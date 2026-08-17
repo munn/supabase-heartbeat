@@ -1,0 +1,19 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Local dev secrets template for Supabase Heartbeat.
+#
+# 1. Copy this file to `.dev.vars` (which is git-ignored — NEVER commit it).
+# 2. Fill in your targets. Each target = one Supabase project to keep alive.
+# 3. For real deploys, do NOT use .dev.vars — set the secret instead:
+#       wrangler secret put SUPABASE_TARGETS
+#
+# SUPABASE_TARGETS is a JSON array. Use single quotes around the whole value so
+# the inner double quotes are preserved.
+#
+# Get the API key from: Supabase dashboard → Project Settings → API.
+# RECOMMENDED: use the anon / publishable key (the one labeled "anon public").
+# keepalive() only does SELECT now() and is granted to anon, so the low-privilege
+# key is enough — no need to scatter the service_role (god) key across projects.
+# (The service_role key also works if you prefer; both are granted EXECUTE.)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SUPABASE_TARGETS='[{"name":"my-dev","url":"https://YOUR_PROJECT_REF.supabase.co","apiKey":"YOUR_ANON_OR_SERVICE_ROLE_KEY"}]'

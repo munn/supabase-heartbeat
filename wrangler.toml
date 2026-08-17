@@ -1,0 +1,21 @@
+# Supabase Heartbeat — generic free-tier keepalive worker
+#
+# A single worker keeps alive any number of Supabase projects. Targets are
+# supplied via the SUPABASE_TARGETS secret (a JSON array), NOT hard-coded here,
+# so adding/removing a project never requires a code change or redeploy of
+# logic — only a secret update.
+#
+# See README.md for the full walkthrough.
+
+name = "supabase-heartbeat"
+main = "src/index.ts"
+compatibility_date = "2025-03-16"
+compatibility_flags = ["nodejs_compat"]
+
+# Daily 09:00 UTC — inside Supabase's documented 7-day free-tier pause window,
+# so a single daily ping is enough to keep every target from auto-pausing.
+[triggers]
+crons = ["0 9 * * *"]
+
+# No KV / R2 / Queue / Services bindings — minimal attack surface.
+# Only one secret is required: SUPABASE_TARGETS.
