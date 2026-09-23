@@ -2,7 +2,8 @@
 # Local dev secrets template for Supabase Heartbeat.
 #
 # 1. Copy this file to `.dev.vars` (which is git-ignored — NEVER commit it).
-# 2. Fill in your targets. Each target = one Supabase project to keep alive.
+# 2. Fill in your targets. Use url + apiKey for Data API projects, or
+#    a Hyperdrive binding name for projects without Data API.
 # 3. For real deploys, do NOT use .dev.vars — set the secret instead:
 #       wrangler secret put SUPABASE_TARGETS
 #
@@ -14,6 +15,8 @@
 # keepalive() only does SELECT now() and is granted to anon, so the low-privilege
 # key is enough — no need to scatter the service_role (god) key across projects.
 # (The service_role key also works if you prefer; both are granted EXECUTE.)
+# For a Data API-disabled project, create and bind a Cloudflare Hyperdrive
+# configuration first. Its database credentials live in Hyperdrive, not here.
 # ─────────────────────────────────────────────────────────────────────────────
 
-SUPABASE_TARGETS='[{"name":"my-dev","url":"https://YOUR_PROJECT_REF.supabase.co","apiKey":"YOUR_ANON_OR_SERVICE_ROLE_KEY"}]'
+SUPABASE_TARGETS='[{"name":"my-dev","url":"https://YOUR_PROJECT_REF.supabase.co","apiKey":"YOUR_ANON_OR_SERVICE_ROLE_KEY"},{"name":"no-data-api","hyperdrive":"DB_NO_DATA_API"}]'

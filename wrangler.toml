@@ -12,10 +12,14 @@ main = "src/index.ts"
 compatibility_date = "2025-03-16"
 compatibility_flags = ["nodejs_compat"]
 
-# Daily 09:00 UTC — inside Supabase's documented 7-day free-tier pause window,
-# so a single daily ping is enough to keep every target from auto-pausing.
+# Three queries daily. Supabase says a few user database requests per day are
+# typically enough, but does not guarantee that any fixed schedule prevents pausing.
 [triggers]
-crons = ["0 9 * * *"]
+crons = ["0 1,9,17 * * *"]
 
 # No KV / R2 / Queue / Services bindings — minimal attack surface.
-# Only one secret is required: SUPABASE_TARGETS.
+# RPC targets use the SUPABASE_TARGETS secret. Add one Hyperdrive binding per
+# Data API-disabled project, using the real configuration ID from Cloudflare:
+# [[hyperdrive]]
+# binding = "DB_NO_DATA_API"
+# id = "YOUR_HYPERDRIVE_CONFIGURATION_ID"

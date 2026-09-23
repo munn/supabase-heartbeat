@@ -2,25 +2,26 @@
 
 > 🌐 中文文档：[README_zh.md](./README_zh.md) · English below.
 
-A small, generic Cloudflare Worker that keeps **any number of Supabase free-tier
-projects** from auto-pausing. Supabase free plans pause a project after 7 days
-of inactivity; this worker pings each configured project once a day so they stay
-alive — no laptop, no cron job on a person's machine required.
+A small Cloudflare Worker that periodically queries multiple Supabase Free Plan
+projects to reduce the chance of an inactivity pause. It supports an RPC over
+the Data API or a PostgreSQL connection for projects with the Data API disabled.
+No laptop or local cron job is needed.
 
 This is a from-scratch, generic rewrite of an older project-specific keepalive
 worker that was hard-wired to a single Supabase project. This version is
-**target-agnostic**: add a project by adding one line to a config — no code
-change, no extra deployment.
+**target-agnostic**: RPC targets need only a secret update; projects with the
+Data API disabled also need a Hyperdrive configuration and binding.
 
 ## How it works
 
-- One Worker, one daily cron (`0 9 * * *` UTC — inside the 7-day pause window).
-- Each invocation reads the `SUPABASE_TARGETS` secret (a JSON array of projects)
-  and calls `POST /rest/v1/rpc/keepalive` on every target with its project API
-  key (the **anon / publishable** key is recommended — see below).
-- `keepalive()` is a trivial SQL function that returns `now()` (see
-  `supabase/migrations/0001_keepalive_function.sql`). It touches the DB without
-  depending on any table.
+- One Worker runs three times a day (01:00, 09:00, and 17:00 UTC). [Supabase says](https://supabase.com/docs/guides/platform/free-project-pausing)
+  a few user database requests each day are typically enough, but does not
+  guarantee that any fixed schedule will prevent pausing.
+- Each invocation reads the `SUPABASE_TARGETS` secret (a JSON array). Each target
+  either calls `POST /rest/v1/rpc/keepalive` or connects to PostgreSQL through
+  Cloudflare Hyperdrive and runs `SELECT now()`.
+- RPC targets need the `keepalive()` SQL function; PostgreSQL targets need no
+  custom function or table.
 - **Failure discipline:** every target is pinged independently. If *any* target
   fails, the worker throws an **aggregated error that names which target(s)
   failed**, so Cloudflare marks the invocation RED and you can tell at a glance
@@ -32,18 +33,18 @@ change, no extra deployment.
 
 ```
 src/index.ts                       # the worker (multi-target scheduled handler)
-wrangler.toml                      # name + daily cron + single SUPABASE_TARGETS secret
+wrangler.toml                      # name + scheduled cron + Hyperdrive binding examples
 supabase/migrations/
-  0001_keepalive_function.sql      # the keepalive() RPC to apply to each target project
-test/scheduled.test.ts             # 7 tests: all-ok / partial-fail / no-op / bad-config / no-fetch
+  0001_keepalive_function.sql      # install only for RPC targets
+test/scheduled.test.ts             # scheduler, both connection modes, and invalid config
 .dev.vars.example                  # local-dev secret template (copy to .dev.vars)
 ```
 
 ## Add a Supabase project to keep alive
 
-You need to do two things per project:
+Choose the method according to whether the project has the Data API enabled.
 
-### 1. Install the `keepalive()` RPC on that Supabase project
+### Data API enabled: RPC
 
 The worker calls `public.keepalive()`, which must exist on the target project.
 Apply `supabase/migrations/0001_keepalive_function.sql` there:
@@ -53,14 +54,40 @@ Apply `supabase/migrations/0001_keepalive_function.sql` there:
 - **CLI:** `supabase migration new keepalive_function`, paste the body, then
   `supabase db push`.
 
-### 2. Add the project to `SUPABASE_TARGETS`
+### Data API disabled: PostgreSQL
+
+1. In the Supabase Dashboard, open **Connect → Session pooler** and copy its
+   port **5432** connection string. Replace `[YOUR-PASSWORD]`, URL-encoding
+   reserved characters in the password. Free Plan direct connections are usually
+   IPv6-only, and this project has not verified Hyperdrive connectivity to an
+   IPv6-only origin, so the IPv4 Session pooler is the default. Do not use the
+   port 6543 Transaction pooler or construct the pooler hostname yourself.
+   [Supabase connections](https://supabase.com/docs/guides/database/connecting-to-postgres)
+2. Create a **Hyperdrive** configuration in the Cloudflare Dashboard with that
+   connection string. **Disable query caching** so each scheduled call reaches
+   the database. Keep the database password in Hyperdrive, not in
+   `SUPABASE_TARGETS` or this repository. [Hyperdrive caching](https://developers.cloudflare.com/hyperdrive/concepts/query-caching/)
+3. Download the project's CA certificate from Supabase Dashboard → Database
+   Settings → SSL Configuration, upload it to Cloudflare, and select
+   **verify-full** with that CA in Hyperdrive. Confirm the certificate covers
+   the Session pooler hostname. Do not disable certificate verification.
+   [Supabase SSL](https://supabase.com/docs/guides/platform/ssl-enforcement) ·
+   [Hyperdrive TLS](https://developers.cloudflare.com/hyperdrive/configuration/tls-ssl-certificates-for-hyperdrive/)
+4. Add a `[[hyperdrive]]` entry to `wrangler.toml` with a binding such as
+   `DB_CLIENT_X` (this Worker requires an uppercase first letter, followed by
+   uppercase letters, digits, or underscores) and the new Hyperdrive
+   configuration ID, then deploy the updated
+   Worker. Each Data API-disabled project needs its own cache-disabled Hyperdrive
+   configuration and binding; no custom SQL function is required.
+
+### Add the project to `SUPABASE_TARGETS`
 
 `SUPABASE_TARGETS` is a JSON array, one entry per project:
 
 ```json
 [
   { "name": "my-dev",    "url": "https://XXXX.supabase.co", "apiKey": "..." },
-  { "name": "client-x",  "url": "https://YYYY.supabase.co", "apiKey": "..." }
+  { "name": "client-x",  "hyperdrive": "DB_CLIENT_X" }
 ]
 ```
 
@@ -76,11 +103,10 @@ Or for local dev only, copy `.dev.vars.example` → `.dev.vars` and fill it in
 
 Get the API key from: Supabase dashboard → Project Settings → API.
 
-> **Recommended: use the `anon` / publishable key** (labeled "anon public").
-> `keepalive()` only does `SELECT now()` and is granted to `anon`, so the
-> low-privilege key is enough — you avoid scattering the `service_role` (god) key
-> across every project you keep alive. The `service_role` key works too if you
-> prefer or have anon access locked down.
+> **For RPC targets, prefer the `anon` / publishable key** (labeled "anon public").
+> Hyperdrive stores database credentials for PostgreSQL targets; an `apiKey`
+> cannot replace the database password. Do not mix both configuration methods
+> in one target.
 
 ## Deploy (Cloudflare)
 
@@ -94,19 +120,26 @@ Verify:
 
 - `wrangler deployments list` shows the `supabase-heartbeat` script.
 - Cloudflare Dashboard → Workers → `supabase-heartbeat` → Triggers shows
-  `schedule: 0 9 * * *`.
-- After the first natural 09:00 UTC run (or test locally with
-  `wrangler dev --test-scheduled` → `curl http://localhost:8787/__scheduled`),
-  check each target project's Supabase logs for `POST /rpc/keepalive`.
+  `schedule: 0 1,9,17 * * *`.
+- After the first run, check that Worker logs show each target as `OK`. For RPC
+  targets, check Supabase API logs for `/rpc/keepalive`. For PostgreSQL targets,
+  check whether [Hyperdrive query metrics](https://developers.cloudflare.com/hyperdrive/observability/metrics/)
+  increase; if statement statistics are enabled, you can also check them in
+  Supabase. Successful queries may not appear individually in default database
+  logs. Continue watching for Supabase pause warnings: one successful query is
+  not a guarantee against pausing.
 
-To change targets later, just `wrangler secret put SUPABASE_TARGETS` again — no
-code change, no redeploy needed.
+To add or remove targets whose bindings already exist, update the
+`SUPABASE_TARGETS` secret. A new Hyperdrive binding also requires a
+`wrangler.toml` update and Worker deployment.
 
 ## Decommissioning a target
 
 Remove its entry from `SUPABASE_TARGETS` (`wrangler secret put SUPABASE_TARGETS`
-with the shorter array). If you also want to delete the Supabase project itself,
-do that separately in the Supabase dashboard.
+with the shorter array). If no other Worker uses its Hyperdrive configuration,
+remove the binding from `wrangler.toml`, redeploy, then delete the Hyperdrive
+configuration and its stored database credentials in Cloudflare. Delete the
+Supabase project separately in its dashboard if needed.
 
 ## License
 

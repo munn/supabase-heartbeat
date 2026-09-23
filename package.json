@@ -2,14 +2,18 @@
   "name": "supabase-heartbeat",
   "version": "0.1.0",
   "private": true,
-  "description": "Generic Cloudflare Worker that keeps any number of Supabase free-tier projects alive via the keepalive() RPC.",
+  "description": "Generic Cloudflare Worker that queries Supabase projects through RPC or PostgreSQL.",
   "scripts": {
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
   },
+  "dependencies": {
+    "pg": "^8.23.0"
+  },
   "devDependencies": {
+    "@types/pg": "^8.23.1",
     "@cloudflare/workers-types": "^5.20260811.1",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0",

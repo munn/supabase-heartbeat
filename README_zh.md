@@ -2,15 +2,15 @@
 
 > 🌐 English docs: [README.md](./README.md) · 中文在下方。
 
-一个小型、通用的 Cloudflare Worker，用来防止**任意数量的 Supabase 免费版项目**被自动暂停。Supabase 免费计划在项目 7 天无活动后会自动暂停；这个 Worker 每天把每个配置好的项目 ping 一次，让它们保持活跃——不需要笔记本常开，也不需要在自己机器上跑 cron。
+一个小型、通用的 Cloudflare Worker，定时向多个 Supabase 免费版项目发起数据库查询，以降低因低活动量被自动暂停的可能。可通过 Data API 的 RPC 或 PostgreSQL 连接工作；后者适用于关闭 Data API 的项目。不需要笔记本常开。
 
-本仓库是从零重写的通用版保活 Worker，替代了早期写死单个 Supabase 项目的专用 worker。这个版本是**目标无关的**：加一个项目只要往配置里加一行，无需改代码、无需额外部署。
+本仓库是从零重写的通用版保活 Worker，替代了早期写死单个 Supabase 项目的专用 worker。加 RPC 目标只需更新配置密钥；加关闭 Data API 的目标还需创建并绑定一个 Hyperdrive 连接。
 
 ## 工作原理
 
-- 一个 Worker，一个每日 cron（`0 9 * * *` UTC，落在 7 天暂停窗口内）。
-- 每次触发读取 `SUPABASE_TARGETS` 密钥（一个项目 JSON 数组），对每个目标调用 `POST /rest/v1/rpc/keepalive`，使用其项目 API key（**推荐用 anon / 公开 key**，见下）。
-- `keepalive()` 是一个极简 SQL 函数，返回 `now()`（见 `supabase/migrations/0001_keepalive_function.sql`），只触碰数据库、不依赖任何表。
+- 一个 Worker，每天三次运行（UTC 01:00、09:00、17:00）。[Supabase 官方说明](https://supabase.com/docs/guides/platform/free-project-pausing)称每天几次用户数据库请求通常足够，但**不保证**任何固定频率一定能避免暂停。
+- 每次触发读取 `SUPABASE_TARGETS` 密钥（一个项目 JSON 数组）。每个目标使用一种方式：Data API 开启时调用 `POST /rest/v1/rpc/keepalive`；Data API 关闭时经 Cloudflare Hyperdrive 连接 PostgreSQL 并执行 `SELECT now()`。
+- RPC 目标需要安装 `keepalive()` SQL 函数；PostgreSQL 目标不需要安装函数，也不依赖任何表。
 - **失败纪律**：每个目标独立 ping，某一个失败不会中断其他目标。如果**任何**目标失败，Worker 会抛出一个**聚合错误并点名是哪个目标失败**，这样 Cloudflare 会把这次调用标红，你一眼就能看出哪个项目挂了。失败绝不被静默吞掉。
 - **无 `fetch` handler**——这个 Worker 只是个定时器，不是 HTTP 端点（攻击面最小）。
 
@@ -18,33 +18,40 @@
 
 ```
 src/index.ts                       # worker（多目标 scheduled handler）
-wrangler.toml                      # 名称 + 每日 cron + 单个 SUPABASE_TARGETS 密钥
+wrangler.toml                      # 名称 + 定时 cron + Hyperdrive 绑定位置
 supabase/migrations/
-  0001_keepalive_function.sql      # 需在每个目标项目上应用的 keepalive() RPC
-test/scheduled.test.ts             # 7 个测试：全成功 / 部分失败 / no-op / 坏配置 / 无 fetch
+  0001_keepalive_function.sql      # 仅 RPC 目标需要安装
+test/scheduled.test.ts             # 定时任务、两种连接方式和配置失败测试
 .dev.vars.example                  # 本地开发密钥模板（复制为 .dev.vars）
 LICENSE                            # MIT
 ```
 
 ## 添加要保活的 Supabase 项目
 
-每个项目需要做两件事：
+根据该项目是否开启 Data API，配置对应方式。
 
-### 1. 在该 Supabase 项目上安装 `keepalive()` RPC
+### Data API 已开启：使用 RPC
 
 Worker 调用 `public.keepalive()`，该函数必须存在于目标项目上。应用 `supabase/migrations/0001_keepalive_function.sql`：
 
 - **SQL Editor**：Supabase 后台 → SQL → New query，粘贴文件内容运行。（会把 `keepalive()` 的 `EXECUTE` 授权给 `anon` 和 `service_role`。）
 - **CLI**：`supabase migration new keepalive_function`，粘贴函数体，然后 `supabase db push`。
 
-### 2. 把项目加进 `SUPABASE_TARGETS`
+### Data API 已关闭：使用 PostgreSQL
+
+1. 在 Supabase Dashboard → **Connect → Session pooler** 复制连接串（端口 **5432**），替换 `[YOUR-PASSWORD]`；密码里的 `@`、`#`、`/` 等特殊字符需按 URL 规则编码。免费项目的直连地址通常只支持 IPv6，Hyperdrive 到 IPv6-only 地址的可用性尚未在本项目验证，因此默认使用支持 IPv4 的 Session pooler。不要选端口 6543 的 Transaction pooler，也不要自己拼接 pooler 主机名。[Supabase 连接文档](https://supabase.com/docs/guides/database/connecting-to-postgres)
+2. 在 Cloudflare Dashboard 创建一个指向该数据库的 **Hyperdrive** 配置，把连接串填入 Hyperdrive。关闭该配置的**查询缓存**，确保每次定时调用都真正到达数据库；数据库密码只放在 Cloudflare Hyperdrive，不放在 `SUPABASE_TARGETS` 或仓库。[Hyperdrive 缓存说明](https://developers.cloudflare.com/hyperdrive/concepts/query-caching/)
+3. 从 Supabase Dashboard → Database Settings → SSL Configuration 下载该项目的 CA 证书，上传到 Cloudflare，然后在 Hyperdrive 配置里选择 **verify-full** 和该 CA，确认证书覆盖 Session pooler 主机名。不要关闭证书验证。[Supabase SSL 说明](https://supabase.com/docs/guides/platform/ssl-enforcement) · [Hyperdrive TLS 配置](https://developers.cloudflare.com/hyperdrive/configuration/tls-ssl-certificates-for-hyperdrive/)
+4. 在 `wrangler.toml` 加入一个 `[[hyperdrive]]` 条目，`binding` 例如 `DB_CLIENT_X`（本工具要求大写字母、数字和下划线，且以大写字母开头），`id` 填刚创建的 Hyperdrive 配置 ID。部署更新后的 Worker。每个关闭 Data API 的项目都需要自己的**专用、关闭缓存**的 Hyperdrive 配置和绑定；无需安装 SQL 函数。
+
+### 把项目加进 `SUPABASE_TARGETS`
 
 `SUPABASE_TARGETS` 是一个 JSON 数组，每一项 = 一个项目：
 
 ```json
 [
   { "name": "my-dev",    "url": "https://XXXX.supabase.co", "apiKey": "..." },
-  { "name": "client-x",  "url": "https://YYYY.supabase.co", "apiKey": "..." }
+  { "name": "client-x",  "hyperdrive": "DB_CLIENT_X" }
 ]
 ```
 
@@ -59,7 +66,7 @@ wrangler secret put SUPABASE_TARGETS
 
 API key 从 Supabase 后台 → Project Settings → API 获取。
 
-> **推荐：使用 `anon` / 公开 key**（标注为 "anon public"）。`keepalive()` 只做 `SELECT now()`，且已授权给 anon，低权限 key 就够用——你不必把 `service_role`（上帝）key 散落到每个要保活的项目上。当然 `service_role` key 也能用（如果你更喜欢，或 anon 访问被锁）。
+> **RPC 目标推荐使用 `anon` / 公开 key**（标注为 "anon public"）。Hyperdrive 目标的数据库账号密码保存在 Hyperdrive 配置中；`apiKey` 不能代替数据库密码。两种字段不能放在同一个目标中。
 
 ## 部署（Cloudflare）
 
@@ -72,14 +79,14 @@ wrangler deploy                           # 单 worker，cron 在 wrangler.toml 
 验证：
 
 - `wrangler deployments list` 显示 `supabase-heartbeat` script。
-- Cloudflare Dashboard → Workers → `supabase-heartbeat` → Triggers 显示 `schedule: 0 9 * * *`。
-- 首次自然 09:00 UTC 运行后（或本地用 `wrangler dev --test-scheduled` → `curl http://localhost:8787/__scheduled` 测试），到各目标项目的 Supabase 日志里看 `POST /rpc/keepalive`。
+- Cloudflare Dashboard → Workers → `supabase-heartbeat` → Triggers 显示 `schedule: 0 1,9,17 * * *`。
+- 首次运行后看 Worker 日志是否显示各目标 `OK`；RPC 目标还可在 Supabase API 日志中核对 `/rpc/keepalive`。PostgreSQL 目标可核对 [Hyperdrive 查询指标](https://developers.cloudflare.com/hyperdrive/observability/metrics/)是否增长；如果已启用数据库语句统计，也可在 Supabase 核对查询。数据库默认日志不一定逐条记录成功查询。持续观察 Supabase 暂停预警；一次成功查询不构成永不暂停的保证。
 
-以后改目标，只需再次 `wrangler secret put SUPABASE_TARGETS`——无需改代码、无需重新部署逻辑。
+以后增删已有绑定对应的目标，只需更新 `SUPABASE_TARGETS` 密钥。增加新的 Hyperdrive 绑定还要更新 `wrangler.toml` 并部署 Worker。
 
 ## 停用某个目标
 
-从 `SUPABASE_TARGETS` 里删掉对应条目（`wrangler secret put SUPABASE_TARGETS` 传入更短的数组）。如果你还想连 Supabase 项目本身一起删，去 Supabase 后台单独操作。
+从 `SUPABASE_TARGETS` 里删掉对应条目（`wrangler secret put SUPABASE_TARGETS` 传入更短的数组）。如果该 Hyperdrive 配置不再被其他 Worker 使用，也应从 `wrangler.toml` 移除绑定、重新部署，再在 Cloudflare 删除该 Hyperdrive 配置及其中保存的数据库凭据。删除 Supabase 项目需在其后台单独操作。
 
 ## 许可证
 
