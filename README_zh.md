@@ -14,6 +14,12 @@
 - **失败纪律**：每个目标独立 ping，某一个失败不会中断其他目标。如果**任何**目标失败，Worker 会抛出一个**聚合错误并点名是哪个目标失败**，这样 Cloudflare 会把这次调用标红，你一眼就能看出哪个项目挂了。失败绝不被静默吞掉。
 - **无 `fetch` handler**——这个 Worker 只是个定时器，不是 HTTP 端点（攻击面最小）。
 
+## 已验证的运行状态（2026-09-24）
+
+已有一个生产 Worker 同时保活两个项目：Data API 开启的项目通过 RPC，关闭的项目通过 PostgreSQL/Hyperdrive。首次正式 Cron 于 2026-09-24 01:01 UTC 在 Cloudflare 历史记录中显示成功；同次 Worker 日志中两种方式均为 `OK`，其中 RPC 返回 HTTP 200。PostgreSQL 项目的专用角色 `SELECT now()` 调用计数也在该次运行后增加 1。此前还通过 Cloudflare 远程预览分别即时验证了两条路径。
+
+仓库中的 `wrangler.toml` 是通用模板，**不包含生产 Hyperdrive ID 或数据库凭据**。复现关闭 Data API 的部署时，先在不提交到 Git 的配置副本中填入实际绑定和 ID，再用该配置部署；仅运行下方的模板部署命令不会带上生产 Hyperdrive 绑定。上述一次成功运行不保证 Supabase 永不暂停。
+
 ## 项目结构
 
 ```
@@ -72,9 +78,11 @@ API key 从 Supabase 后台 → Project Settings → API 获取。
 
 ```bash
 npm install
-wrangler secret put SUPABASE_TARGETS      # 设置你的目标（见上文）
-wrangler deploy                           # 单 worker，cron 在 wrangler.toml 中
+wrangler deploy                           # 仅 RPC 目标可直接使用模板
+wrangler secret put SUPABASE_TARGETS      # 部署后设置目标（见上文）
 ```
+
+有 PostgreSQL 目标时，以上两条 Wrangler 命令都须指向同一份包含真实 Hyperdrive 绑定的私有配置（使用 `--config`）；不要直接部署仓库模板。私有配置放在 Git 忽略目录中，并用 `git check-ignore` 核实；如果配置不在仓库根目录，需按其位置修正 `main` 相对路径，同时保留 Cron 触发器和 Workers Logs 设置。
 
 验证：
 

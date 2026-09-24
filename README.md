@@ -29,6 +29,12 @@ Data API disabled also need a Hyperdrive configuration and binding.
 - **No `fetch` handler** — the worker is an alarm only, not an HTTP endpoint
   (minimal attack surface).
 
+## Verified production status (2026-09-24)
+
+One production Worker now queries two projects: an RPC target with the Data API enabled and a PostgreSQL/Hyperdrive target with it disabled. Cloudflare recorded the first scheduled Cron as successful at 01:01 UTC on 2026-09-24. Both paths logged `OK` in the same invocation, with HTTP 200 for the RPC. The dedicated PostgreSQL role's `SELECT now()` call count increased by one after that run. Both paths had also succeeded in an immediate Cloudflare remote preview.
+
+The repository's `wrangler.toml` is a generic template and **does not contain the production Hyperdrive ID or database credentials**. To reproduce a Data API-disabled deployment, first put the real binding and ID in a Git-ignored copy of the configuration and deploy with that configuration. The template deploy command below alone will not include the production Hyperdrive binding. One successful run does not guarantee that Supabase will never pause a project.
+
 ## Project layout
 
 ```
@@ -112,9 +118,11 @@ Get the API key from: Supabase dashboard → Project Settings → API.
 
 ```bash
 npm install
-wrangler secret put SUPABASE_TARGETS      # set your targets (see above)
-wrangler deploy                           # single worker, cron is in wrangler.toml
+wrangler deploy                           # template is for RPC-only targets
+wrangler secret put SUPABASE_TARGETS      # set targets after deploying
 ```
+
+For a PostgreSQL target, point both Wrangler commands at the same private configuration containing the real Hyperdrive binding (using `--config`). Do not deploy the repository template directly. Keep that configuration in a Git-ignored directory and verify it with `git check-ignore`; if it lives outside the repository root, adjust `main` relative to its location and preserve the Cron trigger and Workers Logs settings.
 
 Verify:
 
